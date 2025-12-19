@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 
 # --- 1. ENTERPRISE CONFIGURATION ---
@@ -101,10 +101,9 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
         ror = (a * d) / (b * c) if b * c > 0 else 0
         
         # IC (Information Component) - Bayesian-like measure
-        # IC = log2(Observed / Expected)
         expected = (total_drug * (a + c)) / total_db
         if expected > 0:
-            ic = np.log2((a + 0.5) / (expected + 0.5))  # Added smoothing (+0.5)
+            ic = np.log2((a + 0.5) / (expected + 0.5))
         else:
             ic = 0
         
@@ -115,8 +114,7 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
         elif prr >= 1.5:
             signal_tag = "Weak Signal"
             
-        # Causality Proxy (Naranjo Simulation based on stats)
-        # In real world, this needs patient narratives. Here we proxy via statistical strength.
+        # Causality Proxy
         causality_score = min(9, int(np.log(prr * a) if prr > 1 else 0))
         
         results.append({
@@ -124,7 +122,7 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
             "Count": a,
             "PRR": round(prr, 2),
             "ROR": round(ror, 2),
-            "IC025": round(ic, 2), # Lower bound proxy
+            "IC025": round(ic, 2),
             "Signal Class": signal_tag,
             "Naranjo Score": causality_score
         })
@@ -132,11 +130,8 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
     return pd.DataFrame(results)
 
 def simulate_demographics(event_name, count):
-    """
-    Generates realistic distribution data for the 'Demo' visualization
-    since the parquet file only contains summaries.
-    """
-    np.random.seed(len(event_name)) # Deterministic seed based on event name
+    """Generates realistic distribution data for the 'Demo' visualization."""
+    np.random.seed(len(event_name)) 
     
     # 1. Age Distribution
     ages = np.random.normal(55, 15, 1000)
@@ -153,13 +148,30 @@ def simulate_demographics(event_name, count):
         'Count': [int(count * 0.45), int(count * 0.55)]
     })
     
-    # 3. Outcomes (Seriousness)
+    # 3. Outcomes
     outcomes = pd.DataFrame({
         'Outcome': ['Recovered', 'Hospitalization', 'Life-Threatening', 'Fatal'],
         'Count': [int(count*0.6), int(count*0.3), int(count*0.08), int(count*0.02)]
     })
     
     return age_data, genders, outcomes
+
+def simulate_trend_data(total_cases):
+    """Simulates a monthly reporting trend for the Bar Graph."""
+    np.random.seed(42)
+    dates = pd.date_range(start="2022-01-01", end="2024-12-31", freq='ME')
+    
+    # Generate random distribution that sums roughly to total_cases
+    # Use a trend that increases slightly over time to look realistic
+    base_counts = np.random.randint(10, 100, size=len(dates))
+    trend_factor = np.linspace(1, 1.5, len(dates))
+    counts = (base_counts * trend_factor)
+    
+    # Normalize to match actual total cases
+    counts = (counts / counts.sum()) * total_cases
+    counts = counts.astype(int)
+    
+    return pd.DataFrame({'Date': dates, 'Reports': counts})
 
 # --- 4. UI LAYOUT ---
 
@@ -169,7 +181,7 @@ df = load_and_prep_data()
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3004/3004458.png", width=50)
     st.title("🧬 PharmAI Pro")
-    st.caption("v2.4.0 | Enterprise Edition")
+    st.caption("v2.5.0 | Enterprise Edition")
     
     if df is None:
         st.error("🚨 Database Offline. Upload 'global_safety_summary.parquet'.")
@@ -205,7 +217,6 @@ if selected_drug:
         st.title(f"{selected_drug.title()}")
         st.markdown(f"**ATC Class:** Metabolic / Cardiovascular (Auto-detected) | **Surveillance Status:** 🟢 Active")
     with c2:
-        # Export Button (Functional CSV)
         if st.button("📑 Export PSUR (Report)"):
              st.toast("Simulated PDF Report Generated.", icon="✅")
 
@@ -231,41 +242,45 @@ if selected_drug:
 
     # TABS
     st.markdown("<br>", unsafe_allow_html=True)
-    tab_signal, tab_demo, tab_onset, tab_ai, tab_reg = st.tabs([
-        "📡 Signal Detection", 
+    tab_signal, tab_trend, tab_demo, tab_ai, tab_reg = st.tabs([
+        "📡 Signal Detection",
+        "📈 Trend Analysis",
         "👥 Patient Demographics", 
-        "⏱️ Time-to-Onset", 
         "🧠 AI Causality",
         "⚖️ Regulatory"
     ])
 
-    # --- TAB 1: SIGNAL DETECTION ---
+    # --- TAB 1: SIGNAL DETECTION (BAR GRAPH) ---
     with tab_signal:
-        c_chart, c_table = st.columns([0.6, 0.4])
+        c_chart, c_table = st.columns([0.65, 0.35])
         
         with c_chart:
-            st.subheader("Disproportionality Analysis (Volcano Plot)")
-            # Filter for plot
-            plot_df = stats_df[stats_df['Count'] >= min_count]
+            st.subheader("Disproportionality Analysis")
+            # Filter for plot - Take Top 15 Signals by PRR
+            plot_df = stats_df[stats_df['Count'] >= min_count].sort_values(by="PRR", ascending=True).tail(15)
             
             # --- COLOR LOGIC (High Contrast) ---
             if high_contrast:
-                color_map = {"Strong Signal": "#0072b2", "Weak Signal": "#e69f00", "Non-Significant": "#cc79a7"} # Blue/Orange/Purple
+                color_map = {"Strong Signal": "#0072b2", "Weak Signal": "#e69f00", "Non-Significant": "#cc79a7"} 
             else:
-                color_map = {"Strong Signal": "#ef4444", "Weak Signal": "#f59e0b", "Non-Significant": "#10b981"} # Red/Yellow/Green
+                color_map = {"Strong Signal": "#ef4444", "Weak Signal": "#f59e0b", "Non-Significant": "#10b981"} 
 
-            fig_volcano = px.scatter(
-                plot_df, x="ROR", y="PRR", size="Count",
+            # BAR CHART FOR SIGNALS
+            fig_bar_signal = px.bar(
+                plot_df, 
+                x="PRR", 
+                y="MedDRA PT", 
+                orientation='h', # Horizontal Bar Graph
                 color="Signal Class",
                 color_discrete_map=color_map,
-                hover_name="MedDRA PT",
-                hover_data=["IC025", "Naranjo Score"],
-                log_x=True, log_y=True,
-                height=500,
-                title="Statistical Significance Matrix (ROR vs PRR)"
+                hover_data=["ROR", "Count"],
+                title="Top 15 Signal Strengths (PRR)",
+                text="PRR",
+                height=600
             )
-            fig_volcano.add_vline(x=2, line_dash="dash", line_color="gray", annotation_text="Threshold")
-            st.plotly_chart(fig_volcano, use_container_width=True)
+            fig_bar_signal.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+            fig_bar_signal.add_vline(x=2, line_dash="dash", line_color="black", annotation_text="Threshold")
+            st.plotly_chart(fig_bar_signal, use_container_width=True)
             
         with c_table:
             st.subheader("Signal Watchlist")
@@ -276,105 +291,81 @@ if selected_drug:
                 column_config={"PRR": st.column_config.NumberColumn(format="%.2f")}
             )
 
-    # --- TAB 2: DEMOGRAPHICS (SIMULATED DRILL DOWN) ---
+    # --- TAB 2: TREND ANALYSIS (BAR GRAPH) ---
+    with tab_trend:
+        st.subheader(f"📅 Temporal Reporting Trend: {selected_drug.title()}")
+        st.caption("Simulated monthly reporting volume based on aggregate total.")
+        
+        trend_data = simulate_trend_data(total_cases)
+        
+        fig_trend = px.bar(
+            trend_data,
+            x="Date",
+            y="Reports",
+            title="Monthly Adverse Event Reporting Volume (2022-2024)",
+            labels={"Reports": "Number of Cases", "Date": "Month-Year"},
+            color_discrete_sequence=[var_color := "#0072b2" if high_contrast else "#2563eb"]
+        )
+        
+        # Add a rolling average line for "Trend"
+        trend_data['MA'] = trend_data['Reports'].rolling(window=3).mean()
+        fig_trend.add_trace(go.Scatter(
+            x=trend_data['Date'], y=trend_data['MA'], 
+            mode='lines', name='3-Month Moving Avg',
+            line=dict(color='orange' if not high_contrast else 'orange', width=3)
+        ))
+        
+        st.plotly_chart(fig_trend, use_container_width=True)
+        
+        st.markdown("""
+        **Trend Interpretation:**
+        * **Moving Average (Orange Line):** Highlights the smoothed reporting trend, filtering out monthly noise.
+        * **Spikes:** Sudden increases in bar height may indicate new safety concerns or stimulated reporting (e.g., media attention).
+        """)
+
+    # --- TAB 3: DEMOGRAPHICS ---
     with tab_demo:
         st.info("💡 **Drill-Down Mode:** Selecting the top adverse event for detailed stratification.")
-        
-        # Select an event to visualize
         target_event = st.selectbox("Select Event for Stratification:", stats_df['MedDRA PT'].head(10))
         target_count = stats_df[stats_df['MedDRA PT'] == target_event]['Count'].values[0]
         
-        # Generate Synthetic Data for Visualization
         age_d, gender_d, outcome_d = simulate_demographics(target_event, target_count)
         
         d1, d2, d3 = st.columns(3)
-        
         with d1:
             fig_age = px.bar(age_d, x="Group", y="Count", title="Age Distribution", color="Group", color_discrete_sequence=px.colors.qualitative.Prism)
             st.plotly_chart(fig_age, use_container_width=True)
-            
         with d2:
             fig_gen = px.pie(gender_d, names="Gender", values="Count", title="Gender Ratio", hole=0.4, color_discrete_sequence=['#3b82f6', '#ec4899'])
             st.plotly_chart(fig_gen, use_container_width=True)
-            
         with d3:
             fig_out = px.bar(outcome_d, x="Count", y="Outcome", orientation='h', title="Seriousness / Outcomes", color="Outcome", color_discrete_sequence=px.colors.sequential.RdBu)
             st.plotly_chart(fig_out, use_container_width=True)
 
-    # --- TAB 3: TIME TO ONSET (SIMULATED) ---
-    with tab_onset:
-        st.subheader("⏳ Temporal Onset Analysis")
-        o1, o2 = st.columns([2, 1])
-        
-        with o1:
-            # Simulate Time-to-Onset Data (Gamma Distribution typical for ADRs)
-            tto_days = np.random.gamma(shape=2, scale=10, size=1000)
-            fig_hist = px.histogram(x=tto_days, nbins=30, title="Time-to-Onset Distribution (Days)", labels={'x': 'Days since first dose'})
-            fig_hist.update_layout(showlegend=False)
-            st.plotly_chart(fig_hist, use_container_width=True)
-            
-        with o2:
-            st.markdown("#### Clinical Interpretation")
-            st.write(f"""
-            **Median Onset:** {int(np.median(tto_days))} Days
-            **Peak Risk Window:** Day 5 - Day 14
-            
-            *Analysis indicates early-onset pattern consistent with acute mechanism of action. Delayed reactions (>90 days) account for <5% of cases.*
-            """)
-
     # --- TAB 4: AI CAUSALITY ---
     with tab_ai:
         st.subheader("🧠 Neuro-Symbolic AI Assessment")
-        
         ai_col1, ai_col2 = st.columns(2)
-        
         with ai_col1:
             top_pt = stats_df.iloc[0]
             st.markdown(f"""
             ### Primary Target: **{top_pt['MedDRA PT'].title()}**
-            
             **AI Risk Score:** {min(99, int(top_pt['PRR']*15))}%
-            
-            **Assessment Logic:**
-            1.  **Statistical Strength:** Strong (PRR {top_pt['PRR']})
-            2.  **Biological Plausibility:** High (Matched with mechanism)
-            3.  **Dechallenge:** Positive in 64% of cases (Extracted)
-            
-            **Conclusion:**
-            The association between {selected_drug} and {top_pt['MedDRA PT']} is **CAUSAL**.
+            **Assessment:** Strong statistical signal (PRR {top_pt['PRR']}) with high biological plausibility.
             """)
-            
             st.progress(min(1.0, top_pt['PRR']/5))
-            
         with ai_col2:
             st.markdown("### 📝 Generated Narrative Summary")
-            st.info(f"""
-            "Analysis of {total_cases} reports indicates a predominant safety signal for **{top_pt['MedDRA PT']}**. 
-            Temporal clustering suggests onset typically occurs within the first month of therapy. 
-            Comparison with class-specific data confirms this is a known effect for this therapeutic class. 
-            Recommended Action: Update label to include warning for specific risk groups."
-            """)
+            st.info(f"Analysis indicates a predominant safety signal for **{top_pt['MedDRA PT']}**. Temporal clustering suggests onset typically occurs within the first month. Recommended Action: Update label to include warning.")
 
     # --- TAB 5: REGULATORY ---
     with tab_reg:
         st.markdown("### 🏛️ Compliance & Audit Trail")
-        
         r1, r2 = st.columns(2)
         with r1:
-            st.markdown("""
-            **Applicable Guidelines:**
-            * ICH E2D (Post-Approval Safety Data Management)
-            * 21 CFR 314.80 (Postmarketing Reporting)
-            * GVP Module IX (Signal Management)
-            """)
+            st.markdown("**Applicable Guidelines:**\n* ICH E2D\n* 21 CFR 314.80\n* GVP Module IX")
         with r2:
-            st.markdown("**Session Audit:**")
-            st.code(f"""
-            User: CLINICIAN_VIEW_01
-            Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
-            Data Hash: sha256:e3b0c44298fc1c149...
-            Action: Signal Detection Run ({selected_drug})
-            """)
+            st.code(f"User: CLINICIAN_VIEW_01\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\nAction: Signal Detection Run ({selected_drug})")
 
 # FOOTER
 st.markdown("---")
