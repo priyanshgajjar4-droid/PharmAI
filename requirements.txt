@@ -1,5 +1,8 @@
 streamlit
 pandas
 plotly
+numpy
+scipy
 pyarrow
 fastparquet
+reportlab
