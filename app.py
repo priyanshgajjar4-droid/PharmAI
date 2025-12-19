@@ -4,7 +4,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import time
 
 # --- 1. ENTERPRISE CONFIGURATION ---
 st.set_page_config(
@@ -81,7 +80,7 @@ def load_and_prep_data():
 def calculate_advanced_stats(df, selected_drug, top_n=500):
     """
     Industry-Grade Signal Detection Algorithm.
-    Calculates PRR, ROR, and Information Component (IC).
+    Calculates PRR, ROR, Information Component (IC), and Naranjo Proxy.
     """
     total_db = df['count'].sum()
     drug_df = df[df['drugname'] == selected_drug]
@@ -130,6 +129,10 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
         # In a real app, this would come from outcomes (Fatal/Hospitalized)
         severity_score = np.random.randint(20, 95) 
         
+        # Causality Proxy (Naranjo Simulation based on stats)
+        # We ensure this is an integer for display
+        causality_score = min(9, int(np.log(prr * a) if prr > 1 else 0))
+        
         results.append({
             "MedDRA PT": pt,
             "Count": a,
@@ -137,7 +140,8 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
             "ROR": round(ror, 2),
             "IC025": round(ic, 2),
             "Signal Class": signal_tag,
-            "Severity Score": severity_score
+            "Severity Score": severity_score,
+            "Naranjo Score": causality_score 
         })
         
     return pd.DataFrame(results)
@@ -146,7 +150,7 @@ def simulate_trend_data(total_cases):
     """Simulates a monthly reporting trend STRICTLY 2022-2024."""
     np.random.seed(42)
     # STRICT DATE RANGE: Jan 2022 to Dec 2024 (Ends Dec 31, 2024)
-    dates = pd.date_range(start="2022-01-01", end="2024-12-31", freq='M')
+    dates = pd.date_range(start="2022-01-01", end="2024-12-31", freq='ME')
     
     # Generate trend
     base_counts = np.random.randint(10, 100, size=len(dates))
@@ -194,7 +198,7 @@ df = load_and_prep_data()
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3004/3004458.png", width=50)
     st.title("🧬 PharmAI Pro")
-    st.caption("v2.6.0 | Enterprise Edition")
+    st.caption("v2.7.0 | Enterprise Edition")
     
     if df is None:
         st.error("🚨 Database Offline. Upload 'global_safety_summary.parquet'.")
@@ -210,8 +214,7 @@ with st.sidebar:
     
     selected_drug = st.selectbox("Therapeutic Agent", all_drugs, index=default_idx)
     
-    st.markdown("### ⚙️ Filters & Settings")
-    min_count = st.slider("Min. Case Count", 1, 100, 5)
+    # Download Button (Placeholder - will be populated after stats calc)
     
     # ACCESSIBILITY TOGGLE
     st.markdown("---")
@@ -224,6 +227,22 @@ with st.sidebar:
 
 # MAIN CONTENT
 if selected_drug:
+    # Run Analysis FIRST to get data for download/kpis
+    stats_df = calculate_advanced_stats(df, selected_drug)
+    if stats_df.empty:
+        st.warning("No data available.")
+        st.stop()
+
+    # Sidebar Download Button (Now that we have stats_df)
+    with st.sidebar:
+        csv_data = stats_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Raw ADR Data (CSV)",
+            data=csv_data,
+            file_name=f"{selected_drug}_adverse_reactions.csv",
+            mime="text/csv"
+        )
+
     # Header Section
     c1, c2 = st.columns([0.8, 0.2])
     with c1:
@@ -232,12 +251,6 @@ if selected_drug:
     with c2:
         if st.button("📑 Export PSUR (Report)"):
              st.toast("Simulated PDF Report Generated.", icon="✅")
-
-    # Run Analysis
-    stats_df = calculate_advanced_stats(df, selected_drug)
-    if stats_df.empty:
-        st.warning("No data available.")
-        st.stop()
         
     # KPIs
     st.markdown("<br>", unsafe_allow_html=True)
@@ -270,13 +283,13 @@ if selected_drug:
         # 1. VISUALIZATION (BAR GRAPH with SEVERITY SHADING)
         with c_visual:
             st.subheader("⚠️ Top Adverse Events by Volume & Severity")
+            st.caption("Bar length represents Case Volume. Color intensity represents Severity.")
             
             # Filter and Sort: Top 15 by Count (Volume)
-            plot_df = stats_df[stats_df['Count'] >= min_count].sort_values(by="Count", ascending=True).tail(15)
+            # Taking Top 15 by count ensures the graph isn't overcrowded
+            plot_df = stats_df.sort_values(by="Count", ascending=True).tail(15)
             
             # Create Custom Color Scale (Light to Dark) based on Severity Score
-            # If High Contrast: Light Blue -> Dark Blue
-            # If Standard: Light Red -> Dark Red
             colorscale = "Blues" if high_contrast else "Reds"
             
             fig_signal = px.bar(
@@ -291,14 +304,14 @@ if selected_drug:
                 hover_data=["PRR", "ROR", "Signal Class"], # Stats visible on hover only
                 height=600
             )
-            # Remove PRR/ROR from axes, keep pure Count vs Name
+            # PRR/ROR Removed from Axes, Pure Count vs Event Name
             fig_signal.update_layout(coloraxis_colorbar=dict(title="Severity<br>Index"))
             st.plotly_chart(fig_signal, use_container_width=True)
 
         # 2. STATISTICAL BREAKDOWN (INDIVIDUAL SEGMENTS)
         with c_stats:
             st.subheader("🧮 Statistical Breakdown")
-            st.caption("Deep-dive into the mathematical signal strength for the top critical signals.")
+            st.caption("Deep-dive into the mathematical signal strength for top critical signals.")
             
             # Get Top Critical Signals
             critical_signals = stats_df[stats_df['Signal Class'] == "Strong Signal"].sort_values(by="PRR", ascending=False).head(5)
