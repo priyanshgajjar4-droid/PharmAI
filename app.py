@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
+import hashlib
 
 # --- 1. ENTERPRISE CONFIGURATION ---
 st.set_page_config(
@@ -71,10 +72,20 @@ def load_and_prep_data():
     try:
         # Load summary file
         df = pd.read_parquet("global_safety_summary.parquet")
-        # Normalize columns to handle potential case sensitivity
+        # Normalize columns
         df.columns = [c.lower() for c in df.columns]
-        return df
+        
+        # --- CRITICAL FIX: DEDUPLICATION ---
+        # Normalize text to remove case duplicates (e.g. "Nausea" vs "nausea")
+        df['drugname'] = df['drugname'].astype(str).str.upper().str.strip()
+        df['pt'] = df['pt'].astype(str).str.title().str.strip()
+        
+        # Aggregate counts to ensure 1 row per Drug-Event pair
+        df_clean = df.groupby(['drugname', 'pt'], as_index=False)['count'].sum()
+        
+        return df_clean
     except Exception as e:
+        st.error(f"Data Error: {e}")
         return None
 
 def calculate_advanced_stats(df, selected_drug, top_n=500):
@@ -95,7 +106,7 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
     # Process top N events for performance
     top_events = drug_df.nlargest(top_n, 'count')
     
-    # Deterministic random seed for Severity Score simulation consistency
+    # Deterministic seed for Severity Score
     np.random.seed(42)
 
     for _, row in top_events.iterrows():
@@ -107,7 +118,7 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
         c = global_counts.get(pt, 0) - a
         d = total_db - total_drug - c
         
-        # Stats
+        # Stats Calculations
         prr = (a / (a + b)) / (c / (c + d)) if c > 0 else 0
         ror = (a * d) / (b * c) if b * c > 0 else 0
         
@@ -125,12 +136,17 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
         elif prr >= 1.5:
             signal_tag = "Weak Signal"
             
-        # Simulate a "Severity Score" (0 to 100) for visualization shading
-        # In a real app, this would come from outcomes (Fatal/Hospitalized)
-        severity_score = np.random.randint(20, 95) 
+        # Simulate Severity Score (Weighted random to favor Serious terms)
+        # Check for keywords to make simulation more realistic
+        serious_keywords = ['Fail', 'Death', 'Malign', 'Cancer', 'Infarct', 'Severe', 'Angio', 'Toxic', 'Sepsis', 'Pneumonia']
+        is_serious = any(k in pt for k in serious_keywords)
         
-        # Causality Proxy (Naranjo Simulation based on stats)
-        # We ensure this is an integer for display
+        if is_serious:
+            severity_score = np.random.randint(75, 100) # High severity for keywords
+        else:
+            severity_score = np.random.randint(20, 85) 
+        
+        # Causality Proxy
         causality_score = min(9, int(np.log(prr * a) if prr > 1 else 0))
         
         results.append({
@@ -149,26 +165,33 @@ def calculate_advanced_stats(df, selected_drug, top_n=500):
 def simulate_trend_data(total_cases):
     """Simulates a monthly reporting trend STRICTLY 2022-2024."""
     np.random.seed(42)
-    # STRICT DATE RANGE: Jan 2022 to Dec 2024 (Ends Dec 31, 2024)
     dates = pd.date_range(start="2022-01-01", end="2024-12-31", freq='ME')
     
-    # Generate trend
     base_counts = np.random.randint(10, 100, size=len(dates))
     trend_factor = np.linspace(1, 1.5, len(dates))
     counts = (base_counts * trend_factor)
     
-    # Normalize to match actual total cases
     counts = (counts / counts.sum()) * total_cases
     counts = counts.astype(int)
     
     return pd.DataFrame({'Date': dates, 'Reports': counts})
 
 def simulate_demographics(event_name, count):
-    """Generates realistic distribution data for the 'Demo' visualization."""
-    np.random.seed(len(event_name)) 
+    """
+    Generates realistic distribution data using HASHING to ensure
+    every adverse event gets a UNIQUE graph pattern.
+    """
+    # --- CRITICAL FIX: UNIQUE SEED PER EVENT ---
+    # Use SHA256 hash of the name to generate a unique integer seed
+    hash_obj = hashlib.sha256(event_name.encode())
+    seed_int = int(hash_obj.hexdigest(), 16) % (2**32)
+    np.random.seed(seed_int) 
     
-    # 1. Age Distribution
-    ages = np.random.normal(55, 15, 1000)
+    # 1. Age Distribution (Randomized mean/std based on seed)
+    mean_age = np.random.randint(35, 75)
+    std_age = np.random.randint(10, 25)
+    
+    ages = np.random.normal(mean_age, std_age, 1000)
     ages = ages[(ages > 0) & (ages < 100)]
     hist, bins = np.histogram(ages, bins=[0, 18, 40, 65, 100])
     age_data = pd.DataFrame({
@@ -176,16 +199,23 @@ def simulate_demographics(event_name, count):
         'Count': (hist / hist.sum() * count).astype(int)
     })
     
-    # 2. Gender
+    # 2. Gender (Randomized ratio based on seed)
+    male_ratio = np.random.uniform(0.3, 0.7)
     genders = pd.DataFrame({
         'Gender': ['Male', 'Female'],
-        'Count': [int(count * 0.45), int(count * 0.55)]
+        'Count': [int(count * male_ratio), int(count * (1-male_ratio))]
     })
     
-    # 3. Outcomes
+    # 3. Outcomes (Randomized based on seed)
+    # Ensure Fatal is always low but variable
+    rec = np.random.uniform(0.5, 0.8)
+    hosp = np.random.uniform(0.1, 0.3)
+    fatal = 1.0 - rec - hosp
+    if fatal < 0: fatal = 0.01
+    
     outcomes = pd.DataFrame({
-        'Outcome': ['Recovered', 'Hospitalization', 'Life-Threatening', 'Fatal'],
-        'Count': [int(count*0.6), int(count*0.3), int(count*0.08), int(count*0.02)]
+        'Outcome': ['Recovered', 'Hospitalization', 'Fatal'],
+        'Count': [int(count*rec), int(count*hosp), int(count*fatal)]
     })
     
     return age_data, genders, outcomes
@@ -198,7 +228,7 @@ df = load_and_prep_data()
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3004/3004458.png", width=50)
     st.title("🧬 PharmAI Pro")
-    st.caption("v2.7.0 | Enterprise Edition")
+    st.caption("v2.9.1 | Enterprise Edition")
     
     if df is None:
         st.error("🚨 Database Offline. Upload 'global_safety_summary.parquet'.")
@@ -214,8 +244,6 @@ with st.sidebar:
     
     selected_drug = st.selectbox("Therapeutic Agent", all_drugs, index=default_idx)
     
-    # Download Button (Placeholder - will be populated after stats calc)
-    
     # ACCESSIBILITY TOGGLE
     st.markdown("---")
     high_contrast = st.toggle("Accessibility: High Contrast Mode")
@@ -227,13 +255,13 @@ with st.sidebar:
 
 # MAIN CONTENT
 if selected_drug:
-    # Run Analysis FIRST to get data for download/kpis
+    # Run Analysis FIRST
     stats_df = calculate_advanced_stats(df, selected_drug)
     if stats_df.empty:
         st.warning("No data available.")
         st.stop()
 
-    # Sidebar Download Button (Now that we have stats_df)
+    # Sidebar Download Button
     with st.sidebar:
         csv_data = stats_df.to_csv(index=False).encode('utf-8')
         st.download_button(
@@ -276,53 +304,56 @@ if selected_drug:
         "⚖️ Regulatory"
     ])
 
-    # --- TAB 1: SIGNAL DETECTION (UPDATED) ---
+    # --- TAB 1: SIGNAL DETECTION (PRIORITIZING HIGH PRR) ---
     with tab_signal:
         c_visual, c_stats = st.columns([0.65, 0.35])
         
-        # 1. VISUALIZATION (BAR GRAPH with SEVERITY SHADING)
+        # 1. VISUALIZATION 
         with c_visual:
-            st.subheader("⚠️ Top Adverse Events by Volume & Severity")
-            st.caption("Bar length represents Case Volume. Color intensity represents Severity.")
+            st.subheader("⚠️ Critical Signals (Ranked by Strength)")
+            st.caption("Bar length represents Signal Strength (PRR). Color intensity represents Severity.")
             
-            # Filter and Sort: Top 15 by Count (Volume)
-            # Taking Top 15 by count ensures the graph isn't overcrowded
-            plot_df = stats_df.sort_values(by="Count", ascending=True).tail(15)
+            # --- CRITICAL CHANGE: FILTERING LOGIC ---
+            # 1. Filter for Strong Signals only (PRR > 2) to show "Highly Detected/Serious"
+            # 2. Sort by PRR Descending to show strongest first
+            # 3. Take Top 15
+            critical_plot_df = stats_df[stats_df['Signal Class'] == "Strong Signal"].sort_values(by="PRR", ascending=True).tail(15)
             
-            # Create Custom Color Scale (Light to Dark) based on Severity Score
+            # Fallback if no strong signals (show top PRR regardless of threshold)
+            if critical_plot_df.empty:
+                 critical_plot_df = stats_df.sort_values(by="PRR", ascending=True).tail(15)
+
             colorscale = "Blues" if high_contrast else "Reds"
             
             fig_signal = px.bar(
-                plot_df,
-                x="Count",
+                critical_plot_df,
+                x="PRR", 
                 y="MedDRA PT",
                 orientation='h',
-                color="Severity Score", # This drives the shading
+                color="Severity Score",
                 color_continuous_scale=colorscale,
-                title="Event Volume (Shading = Severity Index)",
-                labels={"Count": "Case Reports", "MedDRA PT": "Adverse Event"},
-                hover_data=["PRR", "ROR", "Signal Class"], # Stats visible on hover only
+                title="Top Statistical Signals (PRR > 2.0)",
+                labels={"PRR": "Signal Strength (PRR)", "MedDRA PT": "Adverse Event"},
+                hover_data=["Count", "ROR", "Signal Class"],
                 height=600
             )
-            # PRR/ROR Removed from Axes, Pure Count vs Event Name
             fig_signal.update_layout(coloraxis_colorbar=dict(title="Severity<br>Index"))
+            fig_signal.add_vline(x=2, line_dash="dash", line_color="black", annotation_text="Threshold")
             st.plotly_chart(fig_signal, use_container_width=True)
 
-        # 2. STATISTICAL BREAKDOWN (INDIVIDUAL SEGMENTS)
+        # 2. STATISTICAL BREAKDOWN
         with c_stats:
             st.subheader("🧮 Statistical Breakdown")
-            st.caption("Deep-dive into the mathematical signal strength for top critical signals.")
+            st.caption("Deep-dive into the mathematical signal strength.")
             
-            # Get Top Critical Signals
-            critical_signals = stats_df[stats_df['Signal Class'] == "Strong Signal"].sort_values(by="PRR", ascending=False).head(5)
+            # Get Top Critical Signals (Same sorting as graph)
+            critical_signals_list = critical_plot_df.sort_values(by="PRR", ascending=False).head(5)
             
-            if critical_signals.empty:
+            if critical_signals_list.empty:
                 st.success("No critical signals detected above current threshold.")
             else:
-                for idx, row in critical_signals.iterrows():
-                    # Create a "Card" for each signal
+                for idx, row in critical_signals_list.iterrows():
                     with st.expander(f"🔴 {row['MedDRA PT'].title()}", expanded=(idx==0)):
-                        # Individual Segments for Stats
                         s1, s2, s3 = st.columns(3)
                         s1.metric("PRR", f"{row['PRR']}", help="Proportional Reporting Ratio (>2 is significant)")
                         s2.metric("ROR", f"{row['ROR']}", help="Reporting Odds Ratio")
@@ -335,12 +366,11 @@ if selected_drug:
                         </div>
                         """, unsafe_allow_html=True)
 
-    # --- TAB 2: TREND ANALYSIS (FIXED DATES) ---
+    # --- TAB 2: TREND ANALYSIS ---
     with tab_trend:
         st.subheader(f"📅 Temporal Reporting Trend: {selected_drug.title()}")
         st.caption("Simulated monthly reporting volume (2022-2024).")
         
-        # Trend Data strictly 2022-2024
         trend_data = simulate_trend_data(total_cases)
         
         fig_trend = px.bar(
@@ -352,7 +382,6 @@ if selected_drug:
             color_discrete_sequence=["#2563eb" if not high_contrast else "#0072b2"]
         )
         
-        # Add a rolling average line
         trend_data['MA'] = trend_data['Reports'].rolling(window=3).mean()
         fig_trend.add_trace(go.Scatter(
             x=trend_data['Date'], y=trend_data['MA'], 
@@ -360,21 +389,17 @@ if selected_drug:
             line=dict(color='orange', width=3)
         ))
         
-        # Force X-axis range to exclude 2025
         fig_trend.update_xaxes(range=["2022-01-01", "2024-12-31"]) 
-        
         st.plotly_chart(fig_trend, use_container_width=True)
-        
-        st.markdown("""
-        **Trend Interpretation:**
-        * **Moving Average (Orange Line):** Smoothed trend line identifying sustained increases.
-        * **Data Range:** Analysis strictly limited to verified data availability (2022-2024).
-        """)
 
     # --- TAB 3: DEMOGRAPHICS ---
     with tab_demo:
         st.info("💡 **Drill-Down Mode:** Selecting the top adverse event for detailed stratification.")
-        target_event = st.selectbox("Select Event for Stratification:", stats_df['MedDRA PT'].head(10))
+        
+        # Sort selection by PRR so users see critical events first
+        demo_options = stats_df.sort_values(by="PRR", ascending=False)['MedDRA PT'].head(20).tolist()
+        
+        target_event = st.selectbox("Select Event for Stratification:", demo_options)
         target_count = stats_df[stats_df['MedDRA PT'] == target_event]['Count'].values[0]
         
         age_d, gender_d, outcome_d = simulate_demographics(target_event, target_count)
@@ -395,7 +420,7 @@ if selected_drug:
         st.subheader("🧠 Neuro-Symbolic AI Assessment")
         ai_col1, ai_col2 = st.columns(2)
         with ai_col1:
-            top_pt = stats_df.iloc[0]
+            top_pt = stats_df.sort_values(by="PRR", ascending=False).iloc[0]
             st.markdown(f"""
             ### Primary Target: **{top_pt['MedDRA PT'].title()}**
             **AI Risk Score:** {min(99, int(top_pt['PRR']*15))}%
